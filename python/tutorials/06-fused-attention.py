@@ -17,6 +17,9 @@ import torch
 import triton
 import triton.language as tl
 
+ALLOW_TF32 = True
+ACC_TYPE = tl.float16
+
 
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,  #
@@ -41,17 +44,15 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         k = tl.load(K_block_ptr)
-        qk = tl.dot(q, k, out_dtype=acc.dtype)
+        qk = tl.dot(q, k, allow_tf32=ALLOW_TF32, out_dtype=acc.dtype)
         if STAGE == 2:
             mask = offs_m[:, None] >= (start_n + offs_n[None, :])
-            qk *= qk_scale
-            qk += tl.where(mask, tl.full([1], 0.0, dtype=qk.dtype), tl.full([1], -1.0e4, dtype=qk.dtype))
+            qk = qk * qk_scale + tl.where(mask, tl.full([1], 0.0, dtype=qk.dtype), tl.full([1], -1.0e4, dtype=qk.dtype))
             m_ij = tl.maximum(m_i, tl.reduce(qk, 1, tl.standard._elementwise_max))
             qk -= m_ij[:, None]
         else:
-            m_ij = tl.maximum(m_i, tl.reduce(qk, 1, tl.standard._elementwise_max))
-            qk *= qk_scale
-            qk -= m_ij[:, None]
+            m_ij = tl.maximum(m_i, tl.reduce(qk, 1, tl.standard._elementwise_max) * qk_scale)
+            qk = qk * qk_scale - m_ij[:, None]
         p = tl.math.exp2(qk.to(tl.float32)).to(acc.dtype)
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
@@ -65,7 +66,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
             p = p.to(tl.float8e5)
         else:
             p = p.to(tl.float16)
-        acc = tl.dot(p, v, acc, out_dtype=acc.dtype)
+        acc = tl.dot(p, v, acc, allow_tf32=ALLOW_TF32, out_dtype=acc.dtype)
         # update m_i and l_i
         m_i = m_ij
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
@@ -155,8 +156,8 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
     # initialize pointer to m and l
-    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float16)
-    m_i = tl.full([BLOCK_M], -float("inf"), dtype=acc.dtype)
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=ACC_TYPE)
+    m_i = tl.full([BLOCK_M], -1.0e4, dtype=acc.dtype)
     l_i = tl.full([BLOCK_M], 1.0, dtype=acc.dtype)
     # load scales
     qk_scale = tl.full([1], sm_scale * 1.44269504, dtype=acc.dtype)
@@ -175,17 +176,18 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     if STAGE & 2:
         # barrier makes it easier for compielr to schedule the
         # two loops independently
-        # tl.debug_barrier()
+        tl.debug_barrier()
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
                                         start_m, qk_scale,  #
                                         BLOCK_M, BLOCK_DMODEL, BLOCK_N,  #
                                         2, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
                                         )
     # epilogue
-    # m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
-    # m_ptrs = M + off_hz * N_CTX + offs_m
-    # tl.store(m_ptrs, m_i)
+    if M is not None:
+        m_i += tl.math.log2(l_i.to(tl.float32))
+        m_ptrs = M + off_hz * N_CTX + offs_m
+        tl.store(m_ptrs, m_i)
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
 
@@ -598,9 +600,9 @@ for mode in ["fwd"]:
                     x_names=["N_CTX"],
                     x_vals=[2**i for i in range(10, 15)],
                     line_arg="provider",
-                    line_vals=["triton", "sdpa", "sdpa-packed"] + (["flash"] if HAS_FLASH else []),
-                    line_names=["Triton", "SDPA", "SDPA-Packed"] + (["Flash-2"] if HAS_FLASH else []),
-                    styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("orange", "-")],
+                    line_vals=["triton", "triton-bshd", "sdpa", "sdpa-packed"] + (["flash"] if HAS_FLASH else []),
+                    line_names=["Triton", "Triton-BSHD", "SDPA", "SDPA-Packed"] + (["Flash-2"] if HAS_FLASH else []),
+                    styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("orange", "-"), ("black", "-")],
                     ylabel="ms",
                     plot_name=
                     f"fused-attention-batch{BATCH}-head{N_HEADS}-d{D_HEAD}-{mode}-causal={causal}-fp8={fp8_inputs}",
@@ -624,15 +626,23 @@ def bench_flash_attention(BATCH, H, N_CTX, D_HEAD, causal, mode, provider, fp8_i
     with torch.set_grad_enabled(requires_grad):
         warmup = 25
         rep = 100
-        if provider == "triton":
-            q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=requires_grad)
-            k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=requires_grad)
-            v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=requires_grad)
-            if mode == "fwd" and TORCH_HAS_FP8 and fp8_inputs:
-                q = q.to(torch.float8_e5m2)
-                k = k.to(torch.float8_e5m2)
-                v = v.permute(0, 1, 3, 2)
-                v = v.to(torch.float8_e5m2)
+        if "triton" in provider:
+            if "bshd" in provider:
+                q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=requires_grad)
+                k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=requires_grad)
+                v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=requires_grad)
+                if mode == "fwd" and TORCH_HAS_FP8 and fp8_inputs:
+                    q = q.to(torch.float8_e5m2)
+                    k = k.to(torch.float8_e5m2)
+                    v = v.permute(0, 1, 3, 2)
+                    v = v.to(torch.float8_e5m2)
+            else:
+                q = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device=device, requires_grad=requires_grad)
+                k = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device=device, requires_grad=requires_grad)
+                v = torch.randn((BATCH, N_CTX, H, D_HEAD), dtype=dtype, device=device, requires_grad=requires_grad)
+                q = q.permute(0, 2, 1, 3)
+                k = k.permute(0, 2, 1, 3)
+                v = v.permute(0, 2, 1, 3)
             sm_scale = 1.3
             fn = lambda: attention(q, k, v, causal, sm_scale)
             if mode == "bwd":
