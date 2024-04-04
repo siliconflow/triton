@@ -334,6 +334,51 @@ public:
 };
 } // namespace
 
+static Value promoteOperand(OpBuilder &builder, Location loc, Value operand,
+                            Type promotedType) {
+  Type tensorPromotedType =
+      operand.getType().cast<RankedTensorType>().cloneWith(std::nullopt,
+                                                           promotedType);
+  return builder.create<tt::FpToFpOp>(loc, tensorPromotedType, operand);
+}
+
+// promote operands of dot op if the existing combination is not natively
+// supported.
+static void decomposeMixedModeDotOp(ModuleOp mod, int computeCapability) {
+  mod.walk([=](tt::DotOp dotOp) -> void {
+    auto D = dotOp.getD();
+    OpBuilder builder(dotOp);
+    Type AElType = dotOp.getA().getType().cast<RankedTensorType>().getElementType();
+    Type BElType = dotOp.getB().getType().cast<RankedTensorType>().getElementType();
+    
+    Type promoteType;
+    MmaEncodingAttr mmaLayout =
+        D.getType().cast<RankedTensorType>().getEncoding().dyn_cast<MmaEncodingAttr>();
+    if (mmaLayout) {
+      bool isNativeFP8 = AElType.isFloat8E5M2() || AElType.isFloat8E4M3FNUZ();
+      // promote operands for sm < 89 since fp8 mma is not natively supported
+      // promote operands for sm >= 90 when mma is not v3
+      if (!isNativeFP8 ||
+          (isNativeFP8 && (computeCapability == 89 || mmaLayout.isHopper()))){
+          return;
+          }
+      promoteType = builder.getF16Type();
+    } else {
+      // FMA case.
+      Type AElType = dotOp.getA().getType().cast<RankedTensorType>().getElementType();
+      Type DElType = D.getType().cast<RankedTensorType>().getElementType();
+      if (AElType == DElType)
+        return;
+      promoteType = DElType;
+    }
+    Location loc = dotOp.getLoc();
+    Value promotedA = promoteOperand(builder, loc, dotOp.getA(), promoteType);
+    Value promotedB = promoteOperand(builder, loc, dotOp.getB(), promoteType);
+    dotOp.setOperand(0, promotedA);
+    dotOp.setOperand(1, promotedB);
+  });
+}
+
 #define GEN_PASS_CLASSES
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
@@ -353,6 +398,7 @@ public:
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }
+    decomposeMixedModeDotOp(m, computeCapability);
   }
 };
 

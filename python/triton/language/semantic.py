@@ -1191,7 +1191,7 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, allow_tf32: bool, max_nu
             assert lhs_dtype == rhs_dtype, f"First input ({lhs_dtype}) and second input ({rhs_dtype}) must have the same dtype!"
             return
         # Checks for cuda arch
-        if target.capability < 90:
+        if target.capability < 89:
             assert not lhs_dtype.is_fp8e4nv() and not rhs_dtype.is_fp8e4nv(
             ), "Dot op does not support fp8e4nv on CUDA arch < 90"
             if lhs_dtype.is_fp8() and rhs_dtype.is_fp8():

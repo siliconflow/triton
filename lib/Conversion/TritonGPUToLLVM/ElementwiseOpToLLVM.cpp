@@ -815,10 +815,10 @@ struct FpToFpOpConversion
                    << "\n";
       llvm_unreachable("");
     }
-    if (computeCapability < 90 &&
+    if (computeCapability < 89 &&
         (srcTy.isFloat8E4M3FNUZ() || dstTy.isFloat8E4M3FNUZ())) {
       llvm::errs() << "Conversion from/to f8e4m3nv is only supported on "
-                      "compute capability >= 90"
+                      "compute capability >= 89"
                    << "\n";
       llvm_unreachable("");
     }
