@@ -1,6 +1,5 @@
 #include "../DotOpToLLVM.h"
 #include "../Utility.h"
-#include <iostream>
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -131,17 +130,6 @@ TensorCoreType getMmaType(triton::DotOp op) {
   auto bTy = B.getType().cast<RankedTensorType>();
   // d = a*b + c
   auto dTy = op.getD().getType().cast<RankedTensorType>();
-  std::cout << "--- getMmaType ---\n";
-  std::cout << "dTy.getElementType().isF32() = " << dTy.getElementType().isF32() << "\n";
-  std::cout << "aTy.getElementType().isF16() = " << aTy.getElementType().isF16() << "\n";
-  std::cout << "bTy.getElementType().isF16() = " << bTy.getElementType().isF16() << "\n";
-  std::cout << "aTy.getElementType().isBF16() = " << aTy.getElementType().isBF16() << "\n";
-  std::cout << "bTy.getElementType().isBF16() = " << bTy.getElementType().isBF16() << "\n";
-  std::cout << "aTy.getElementType().isFloat8E5M2() = " << aTy.getElementType().isFloat8E5M2() << "\n";
-  std::cout << "bTy.getElementType().isFloat8E5M2() = " << bTy.getElementType().isFloat8E5M2() << "\n";
-  std::cout << "aTy.getElementType().isFloat8E4M3FNUZ() = " << aTy.getElementType().isFloat8E4M3FNUZ() << "\n";
-  std::cout << "bTy.getElementType().isFloat8E4M3FNUZ() = " << bTy.getElementType().isFloat8E4M3FNUZ() << "\n";
-
 
   if (dTy.getElementType().isF32()) {
     if (aTy.getElementType().isF16() && bTy.getElementType().isF16())

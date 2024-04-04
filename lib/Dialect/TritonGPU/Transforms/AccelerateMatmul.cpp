@@ -8,7 +8,6 @@
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/Support/Debug.h"
 #include <memory>
-#include <iostream>
 
 using namespace mlir;
 namespace tt = mlir::triton;
@@ -352,19 +351,6 @@ static void decomposeMixedModeDotOp(ModuleOp mod, int computeCapability) {
     Type AElType = dotOp.getA().getType().cast<RankedTensorType>().getElementType();
     Type BElType = dotOp.getB().getType().cast<RankedTensorType>().getElementType();
     
-    std::cout << "--- decomposeMixedModeDotOp ---\n";
-    std::cout << "AElType.isF32() = " << AElType.isF32() << "\n";
-    std::cout << "BElType.isF32() = " << BElType.isF32() << "\n";
-    std::cout << "AElType.isF16() = " << AElType.isF16() << "\n";
-    std::cout << "BElType.isF16() = " << BElType.isF16() << "\n";
-    std::cout << "AElType.isBF16() = " << AElType.isBF16() << "\n";
-    std::cout << "BElType.isBF16() = " << BElType.isBF16() << "\n";
-    std::cout << "AElType.isFloat8E5M2() = " << AElType.isFloat8E5M2() << "\n";
-    std::cout << "BElType.isFloat8E5M2() = " << BElType.isFloat8E5M2() << "\n";
-    std::cout << "AElType.isFloat8E4M3FNUZ() = " << AElType.isFloat8E4M3FNUZ() << "\n";
-    std::cout << "BElType.isFloat8E4M3FNUZ() = " << BElType.isFloat8E4M3FNUZ() << "\n";
-  
-
     Type promoteType;
     MmaEncodingAttr mmaLayout =
         D.getType().cast<RankedTensorType>().getEncoding().dyn_cast<MmaEncodingAttr>();
@@ -374,7 +360,6 @@ static void decomposeMixedModeDotOp(ModuleOp mod, int computeCapability) {
       // promote operands for sm >= 90 when mma is not v3
       if (!isNativeFP8 ||
           (isNativeFP8 && (computeCapability == 89 || mmaLayout.isHopper()))){
-          std::cout << "promote return\n";
           return;
           }
       promoteType = builder.getF16Type();
